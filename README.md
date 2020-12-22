@@ -29,3 +29,16 @@ When your job is running/done you'll be able to check out the `examples/running_
 
 `examples/running_carla/statistics_manager` - Helper script to calculate CARLA score
 
+
+### Forking
+Setting up remote pointer to source repo:
+
+`git remote add upstream https://github.com/Stephanehk/Carla_PPO.git`
+
+Syncing local changes with source repo:
+```
+git fetch upstream`
+git checkout master`
+git merge upstream/master
+```
+
