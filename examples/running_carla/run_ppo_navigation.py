@@ -16,10 +16,8 @@ import wandb
 from shapely.geometry import LineString
 from traffic_events import TrafficEventType
 from statistics_manager import StatisticManager
-#IK this is bad, fix file path stuff later :(
-sys.path.append("/scratch/cluster/stephane/Carla_0.9.10/PythonAPI/carla/agents/navigation")
-from global_route_planner import GlobalRoutePlanner
-from global_route_planner_dao import GlobalRoutePlannerDAO
+from agents.navigation.global_route_planner import GlobalRoutePlanner
+from agents.navigation.global_route_planner_dao import GlobalRoutePlannerDAO
 
 SHOW_PREVIEW = False
 #maybe scale these down
@@ -32,11 +30,12 @@ FPS = 60
 class CarEnv:
     rgb_cam = None
 
-    def __init__(self,host,world_port):
-        self.client = carla.Client(host,world_port)
+    def __init__(self, host, world_port):
+        self.client = carla.Client(host, world_port)
         self.client.set_timeout(10.0)
         #self.world = self.client.get_world()
         self.world = self.client.load_world('Town01')
+        self.spectator = self.world.get_spectator()
 
         self.blueprint_lib = self.world.get_blueprint_library()
         self.car_agent_model = self.blueprint_lib.filter("model3")[0]
@@ -116,7 +115,8 @@ class CarEnv:
 
         return area_loc, wps
 
-    def rotate_point(self, point, angle):
+    @staticmethod
+    def rotate_point(point, angle):
         """
         rotate a given point by a given angle
         """
@@ -124,21 +124,21 @@ class CarEnv:
         y_ = math.sin(math.radians(angle)) * point.x + math.cos(math.radians(angle)) * point.y
         return carla.Vector3D(x_, y_, point.z)
 
-    def process_img(self,img,save_video,iter):
-        img = np.array(img.raw_data).reshape(height,width,4)
-        rgb = img[:,:,:3]
+    def process_img(self, img, save_video, iter):
+        img = np.array(img.raw_data).reshape(height, width, 4)
+        rgb = img[:, :, :3]
         #norm = cv2.normalize(rgb, None, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_32F)
         self.rgb_cam = rgb
         if save_video:
             self.out.write(rgb)
             #cv2.imwrite("/scratch/cluster/stephane/cluster_quickstart/examples/running_carla/episode_footage/frame_"+str(iter)+str(self.n_img)+".png",rgb)
-            self.n_img+=1
+            self.n_img += 1
 
     def reset(self, randomize, save_video, iter):
         if (randomize):
-            self.settings = world.get_settings()
+            self.settings = self.world.get_settings()
             self.settings.set(WeatherId=random.randrange(14))
-            self.settings.set(SendNonPlayerAgentsInfo=True,NumberOfVehicles=random.randrange(30),NumberOfPedestrians=random.randrange(30),WeatherId=random.randrange(14))
+            self.settings.set(SendNonPlayerAgentsInfo=True, NumberOfVehicles=random.randrange(30), NumberOfPedestrians=random.randrange(30), WeatherId=random.randrange(14))
             self.settings.randomize_seeds()
             self.world.apply_settings(self.settings)
 
@@ -154,46 +154,48 @@ class CarEnv:
         self.followed_waypoints = []
         #spawn car randomly
         self.spawn_point = random.choice(self.world.get_map().get_spawn_points())
-        self.car_agent = self.world.try_spawn_actor(self.car_agent_model,self.spawn_point)
+        self.car_agent = self.world.try_spawn_actor(self.car_agent_model, self.spawn_point)
         #handle invalid spwawn point
         while self.car_agent == None:
             self.spawn_point = random.choice(self.world.get_map().get_spawn_points())
-            self.car_agent = self.world.try_spawn_actor(self.car_agent_model,self.spawn_point)
+            self.car_agent = self.world.try_spawn_actor(self.car_agent_model, self.spawn_point)
 
         self.actors.append(self.car_agent)
+
         #get camera
         self.rgb_cam = self.blueprint_lib.find("sensor.camera.rgb")
-        self.rgb_cam.set_attribute("image_size_x",f"{width}")
-        self.rgb_cam.set_attribute("image_size_y",f"{height}")
-        self.rgb_cam.set_attribute("fov",f"{fov}")
-        sensor_pos = carla.Transform(carla.Location(x=2.5,z=0.7))
+        self.rgb_cam.set_attribute("image_size_x", f"{width}")
+        self.rgb_cam.set_attribute("image_size_y", f"{height}")
+        self.rgb_cam.set_attribute("fov", f"{fov}")
+        sensor_pos = carla.Transform(carla.Location(x=2.5, z=0.7))
         self.sensor = self.world.spawn_actor(self.rgb_cam, sensor_pos, attach_to=self.car_agent)
         self.actors.append(self.sensor)
         #setup record video
         self.out = None
         if save_video:
-            print ("saving video turned on")
+            print("saving video turned on")
             #self.cap = cv2.VideoCapture(0)
-            fourcc = cv2.VideoWriter_fourcc('M','J','P','G')
-            self.out = cv2.VideoWriter("episode_footage/output_"+str(iter)+".avi", fourcc,1, (height,width))
+            fourcc = cv2.VideoWriter_fourcc('M', 'J', 'P', 'G')
+            self.out = cv2.VideoWriter("episode_footage/output_"+str(iter)+".avi", fourcc, 1, (height, width))
             self.n_img = 0
-        self.sensor.listen(lambda data: self.process_img(data,save_video,iter))
+        self.sensor.listen(lambda data: self.process_img(data, save_video, iter))
+
         #workaround to get things started sooner
         self.car_agent.apply_control(carla.VehicleControl(throttle=0.0, brake=0.0))
         time.sleep(4)
         #get collision sensor
         col_sensor = self.blueprint_lib.find("sensor.other.collision")
-        self.col_sensor = self.world.spawn_actor(col_sensor,sensor_pos,attach_to=self.car_agent)
+        self.col_sensor = self.world.spawn_actor(col_sensor, sensor_pos, attach_to=self.car_agent)
         self.actors.append(self.col_sensor)
         self.col_sensor.listen(lambda event: self.handle_collision(event))
         #get obstacle sensor
         obs_sensor = self.blueprint_lib.find("sensor.other.obstacle")
-        self.obs_sensor = self.world.spawn_actor(obs_sensor,sensor_pos,attach_to=self.car_agent)
+        self.obs_sensor = self.world.spawn_actor(obs_sensor, sensor_pos, attach_to=self.car_agent)
         self.actors.append(self.obs_sensor)
         self.obs_sensor.listen(lambda event: self.handle_obstacle(event))
 
         while self.rgb_cam is None:
-            print ("camera is not starting!")
+            print("camera is not starting!")
             time.sleep(0.01)
 
         self.episode_start = time.time()
@@ -223,10 +225,10 @@ class CarEnv:
         distance_vector = self.car_agent.get_location() - event.other_actor.get_location()
         distance = math.sqrt(math.pow(distance_vector.x, 2) + math.pow(distance_vector.y, 2))
 
-        if not (self.last_col_id == event.other_actor.id and time.time()- self.last_col_time < 1) and self.n_step_cols < 2:
-            self.n_step_cols +=1
+        if not (self.last_col_id == event.other_actor.id and time.time() - self.last_col_time < 1) and self.n_step_cols < 2:
+            self.n_step_cols += 1
             self.collisions.append(event)
-            self.n_collisions+=1
+            self.n_collisions += 1
             self.last_col_id = event.other_actor.id
             self.last_col_time = time.time()
 
@@ -250,9 +252,10 @@ class CarEnv:
                     #reset
                     self.blocked = False
                     self.blocked_start = 0
-                    self.n_vehicle_blocked+=1
+                    self.n_vehicle_blocked += 1
 
-    def is_vehicle_crossing_line(self, seg1, seg2):
+    @staticmethod
+    def is_vehicle_crossing_line(seg1, seg2):
         """
         check if vehicle crosses a line segment
         """
@@ -262,6 +265,7 @@ class CarEnv:
 
         return not inter.is_empty
 
+    @staticmethod
     def point_inside_boundingbox(point, bb_center, bb_extent):
         """
         X
@@ -397,8 +401,7 @@ class CarEnv:
 
                 waypoint_angle = (yaw_pre_wp - yaw_cur_wp) % 360
 
-                if waypoint_angle >= self.MAX_ALLOWED_WAYPOINT_ANGLE \
-                        and waypoint_angle <= (360 - self.MAX_ALLOWED_WAYPOINT_ANGLE):
+                if self.MAX_ALLOWED_WAYPOINT_ANGLE <= waypoint_angle <= (360 - self.MAX_ALLOWED_WAYPOINT_ANGLE):
 
                     # Is the ego vehicle going back to the lane, or going out? Take the opposite
                     self._wrong_lane_active = not bool(self._wrong_lane_active)
@@ -412,7 +415,7 @@ class CarEnv:
         self._last_road_id = current_road_id
         self._pre_ego_waypoint = current_waypoint
 
-    def check_traffic_light_infraction (self):
+    def check_traffic_light_infraction(self):
         transform = self.car_agent.get_transform()
         location = transform.location
 
@@ -457,10 +460,10 @@ class CarEnv:
                         #red_light_event = TrafficEvent(event_type=TrafficEventType.TRAFFIC_LIGHT_INFRACTION)
                         self.events.append([TrafficEventType.TRAFFIC_LIGHT_INFRACTION])
                         self._last_red_light_id = traffic_light.id
-                        self.n_tafficlight_violations+=1
+                        self.n_tafficlight_violations += 1
                         break
 
-    def check_stop_sign_infraction (self):
+    def check_stop_sign_infraction(self):
         transform = self.car_agent.get_transform()
         location = transform.location
         if not self._target_stop_sign:
@@ -489,7 +492,7 @@ class CarEnv:
                     self.stop_actual_value += 1
                     #stop_location = self._target_stop_sign.get_transform().location
                     self.events.append([TrafficEventType.STOP_INFRACTION])
-                    self.n_stopsign_violations+=1
+                    self.n_stopsign_violations += 1
 
                 # reset state
                 self._target_stop_sign = None
@@ -532,9 +535,14 @@ class CarEnv:
                     self._wrong_distance += new_dist
         if self.test_status == "FAILURE" and self._total_distance != 0:
             self.events.append([TrafficEventType.OUTSIDE_ROUTE_LANES_INFRACTION,self._wrong_distance / self._total_distance * 100])
-            self.n_route_violations+=1
+            self.n_route_violations += 1
 
-    def step (self, action):
+    def step(self, action):
+        # spectator camera with overhead view of ego vehicle
+        spectator_rot = self.car_agent.get_transform().rotation
+        spectator_rot.pitch -= 10
+        self.spectator.set_transform(carla.Transform(self.car_agent.get_transform().location + carla.Location(z=2),
+                                                     spectator_rot))
         self.car_agent.apply_control(carla.VehicleControl(throttle=action[0][0],steer=action[0][1]))
         #time.sleep(1)
         velocity = self.car_agent.get_velocity()
@@ -546,11 +554,11 @@ class CarEnv:
         #d2target = np.sqrt(np.power(self.car_agent.get_location().x-self.target.location.x,2)+np.power(self.car_agent.get_location().y-self.target.location.y,2)+np.power(self.car_agent.get_location().z-self.target.location.z,2))
         d2target = self.statistics_manager.route_record["route_length"] - self.statistics_manager.compute_route_length(self.followed_waypoints)
         self.d_completed = self.statistics_manager.compute_route_length(self.followed_waypoints)
-        velocity_kmh = int(3.6*np.sqrt(np.power(velocity.x,2) + np.power(velocity.y,2) + np.power(velocity.z,2)))
-        velocity_mag = np.sqrt(np.power(velocity.x,2) + np.power(velocity.y,2) + np.power(velocity.z,2))
+        velocity_kmh = int(3.6*np.sqrt(np.power(velocity.x,2) + np.power(velocity.y, 2) + np.power(velocity.z, 2)))
+        velocity_mag = np.sqrt(np.power(velocity.x,2) + np.power(velocity.y, 2) + np.power(velocity.z, 2))
         self.cur_velocity = velocity_mag
 
-        state = [self.rgb_cam,velocity_mag,d2target]
+        state = [self.rgb_cam, velocity_mag, d2target]
         state.extend(command_encoded)
 
         #check for traffic light infraction/stoplight infraction
@@ -583,7 +591,7 @@ class CarEnv:
         # self.statistics_manager.prev_velocity_kmh = velocity_kmh
         #------------------------------------------------------------------------------------------------------------------
         #reset is blocked if car is moving
-        if self.cur_velocity > 0 and self.blocked == True:
+        if self.cur_velocity > 0 and self.blocked:
             self.blocked = False
             self.blocked_start = 0
         self.n_step_cols = 0
@@ -613,8 +621,8 @@ class CarEnv:
             self.route_waypoints_unformatted.append(waypoint)
         self.route_kdtree = KDTree(np.array(self.route_waypoints))
 
-#device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
-device = torch.device("cpu")
+device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+# device = torch.device("cpu")
 class PPO_Agent(nn.Module):
     def __init__(self, linear_state_dim, action_dim, action_std):
         super(PPO_Agent, self).__init__()
@@ -655,35 +663,35 @@ class PPO_Agent(nn.Module):
                 )
         self.action_var = torch.full((action_dim,), action_std*action_std).to(device)
 
-    def actor(self,frame,mes):
+    def actor(self, frame, mes):
         frame = frame.to(device)
         mes = mes.to(device)
         if len(list(mes.size())) == 1:
             mes = mes.unsqueeze(0)
         vec = self.actorConv(frame)
-        X = torch.cat((vec,mes),1)
+        X = torch.cat((vec, mes), 1)
         return self.actorLin(X)
 
-    def critic(self,frame,mes):
+    def critic(self, frame, mes):
         frame = frame.to(device)
         mes = mes.to(device)
         if len(list(mes.size())) == 1:
             mes = mes.unsqueeze(0)
         vec = self.criticConv(frame)
-        X = torch.cat((vec,mes),1)
+        X = torch.cat((vec, mes), 1)
         return self.criticLin(X)
 
-    def choose_action(self,frame,mes):
+    def choose_action(self, frame, mes):
         #state = torch.FloatTensor(state.reshape(1, -1)).to(device)
         #state = torch.FloatTensor(state).to(device)
-        mean = self.actor(frame,mes)
+        mean = self.actor(frame, mes)
         cov_matrix = torch.diag(self.action_var)
-        gauss_dist = MultivariateNormal(mean,cov_matrix)
+        gauss_dist = MultivariateNormal(mean, cov_matrix)
         action = gauss_dist.sample()
         action_log_prob = gauss_dist.log_prob(action)
         return action, action_log_prob
 
-    def get_training_params(self,frame,mes, action):
+    def get_training_params(self, frame, mes, action):
         frame = torch.stack(frame)
         mes = torch.stack(mes)
         if len(list(frame.size())) > 4:
@@ -693,14 +701,14 @@ class PPO_Agent(nn.Module):
 
         action = torch.stack(action)
 
-        mean = self.actor(frame,mes)
+        mean = self.actor(frame, mes)
         action_expanded = self.action_var.expand_as(mean)
         cov_matrix = torch.diag_embed(action_expanded).to(device)
 
-        gauss_dist = MultivariateNormal(mean,cov_matrix)
+        gauss_dist = MultivariateNormal(mean, cov_matrix)
         action_log_prob = gauss_dist.log_prob(action).to(device)
         entropy = gauss_dist.entropy().to(device)
-        state_value = torch.squeeze(self.critic(frame,mes)).to(device)
+        state_value = torch.squeeze(self.critic(frame, mes)).to(device)
         return action_log_prob, state_value, entropy
 
 def format_frame(frame):
@@ -709,13 +717,15 @@ def format_frame(frame):
     frame = frame.unsqueeze(0).view(1, c, h, w)
     return frame
 
+
 def format_mes(mes):
     mes = torch.FloatTensor(mes)
     return mes
 
-def train_PPO(host,world_port):
+
+def train_PPO(host, world_port):
     wandb.init(project='PPO_Carla_Navigation')
-    env = CarEnv(host,world_port)
+    env = CarEnv(host, world_port)
     n_iters = 10000
     n_epochs = 50
     max_steps = 2000
@@ -743,11 +753,10 @@ def train_PPO(host,world_port):
     prev_policy = PPO_Agent(n_states, n_actions, action_std).to(device)
     prev_policy.load_state_dict(policy.state_dict())
 
-
     wandb.watch(prev_policy)
 
-    for iters in range (n_iters):
-        s = env.reset(False,False,iters)
+    for iters in range(n_iters):
+        s = env.reset(False, False, iters)
         t = 0
         episode_reward = 0
         done = False
@@ -769,15 +778,15 @@ def train_PPO(host,world_port):
             states_p.append(s_prime)
 
             s = s_prime
-            t+=1
-            episode_reward+=reward
+            t += 1
+            episode_reward += reward
 
         env.cleanup()
         if t == 1:
             continue
-        print ("Episode reward: " + str(episode_reward))
-        print ("Percent completed: " + str(info[0]))
-        avg_t+=t
+        print("Episode reward: " + str(episode_reward))
+        print("Percent completed: " + str(info[0]))
+        avg_t += t
         moving_avg = (episode_reward - moving_avg) * (2/(iters+2)) + moving_avg
 
         wandb.log({"episode_reward (suggested reward)": episode_reward})
@@ -793,34 +802,34 @@ def train_PPO(host,world_port):
             continue
 
         rewards = torch.tensor(rewards).to(device)
-        rewards= (rewards-rewards.mean())/rewards.std()
+        rewards = (rewards-rewards.mean())/rewards.std()
 
         actions_log_probs = torch.FloatTensor(actions_log_probs).to(device)
         #train PPO
         for i in range(n_epochs):
-            current_action_log_probs, state_values, entropies = policy.get_training_params(eps_frames,eps_mes,actions)
+            current_action_log_probs, state_values, entropies = policy.get_training_params(eps_frames, eps_mes, actions)
 
             policy_ratio = torch.exp(current_action_log_probs - actions_log_probs.detach())
             #policy_ratio = current_action_log_probs.detach()/actions_log_probs
             advantage = rewards - state_values.detach()
 
             update1 = (policy_ratio*advantage).float()
-            update2 = (torch.clamp(policy_ratio,1-clip_val, 1+clip_val) * advantage).float()
-            loss = -torch.min(update1,update2) + 0.5*mse(state_values.float(),rewards.float()) - 0.001*entropies
+            update2 = (torch.clamp(policy_ratio, 1-clip_val, 1+clip_val) * advantage).float()
+            loss = -torch.min(update1, update2) + 0.5*mse(state_values.float(), rewards.float()) - 0.001*entropies
 
             optimizer.zero_grad()
             loss.mean().backward()
             optimizer.step()
-            print ("    on epoch " + str(i))
+            print("    on epoch " + str(i))
             #wandb.log({"loss": loss.mean()})
 
         if iters % 50 == 0:
-            torch.save(policy.state_dict(),"policy_state_dictionary.pt")
+            torch.save(policy.state_dict(), "policy_state_dictionary.pt")
         prev_policy.load_state_dict(policy.state_dict())
 
 
-def run_model(host,world_port):
-    env = CarEnv(host,world_port)
+def run_model(host, world_port):
+    env = CarEnv(host, world_port)
     n_iters = 20
 
     n_states = 8
@@ -832,55 +841,55 @@ def run_model(host,world_port):
     policy.load_state_dict(torch.load("policy_state_dictionary.pt"))
     policy.eval()
 
-    for iters in range (n_iters):
-        s = env.reset(False,True,iters)
+    for iters in range(n_iters):
+        s = env.reset(False, True, iters)
         t = 0
         episode_reward = 0
         done = False
-        print ("---------------on iteration " + str(n_iters) + "------------------")
+        print("---------------on iteration " + str(n_iters) + "------------------")
         while not done:
             a, a_log_prob = policy.choose_action(format_frame(s[0]), format_mes(s[1:]))
             s_prime, reward, done, info = env.step(a.detach().tolist())
             velocity = s_prime[1]
-            print ("velocity: " + str(velocity))
+            print("velocity: " + str(velocity))
             s = s_prime
-            t+=1
-            episode_reward+=reward
+            t += 1
+            episode_reward += reward
 
-        print ("Episode reward: " + str(episode_reward))
-        print ("Percent completed: " + str(info[0]))
-        print ("\n")
+        print("Episode reward: " + str(episode_reward))
+        print("Percent completed: " + str(info[0]))
+        print("\n")
         env.cleanup()
 
 
-def random_baseline(host,world_port):
+def random_baseline(host, world_port):
     wandb.init(project='PPO_Carla_Navigation')
-    env = CarEnv(host,world_port)
+    env = CarEnv(host, world_port)
     n_iters = 10000
     avg_t = 0
     moving_avg = 0
+    lr = 0.0001
 
     config = wandb.config
     config.learning_rate = lr
 
+    # wandb.watch(prev_policy)
 
-    wandb.watch(prev_policy)
-
-    for iters in range (n_iters):
-        s = env.reset(False,False,iters)
+    for iters in range(n_iters):
+        s = env.reset(False, False, iters)
         t = 0
         episode_reward = 0
         done = False
         while not done:
-            s_prime, reward, done, info = env.step([[random.uniform(-1, 1),random.uniform(-1, 1)]])
-            t+=1
-            episode_reward+=reward
+            s_prime, reward, done, info = env.step([[random.uniform(-1, 1), random.uniform(-1, 1)]])
+            t += 1
+            episode_reward += reward
 
         if t == 1:
             continue
-        print ("Episode reward: " + str(episode_reward))
-        print ("Percent completed: " + str(info[0]))
-        avg_t+=t
+        print("Episode reward: " + str(episode_reward))
+        print("Percent completed: " + str(info[0]))
+        avg_t += t
         env.cleanup()
         moving_avg = (episode_reward - moving_avg) * (2/(iters+2)) + moving_avg
 
@@ -894,18 +903,20 @@ def random_baseline(host,world_port):
         wandb.log({"number_of_times_vehicle_blocked": info[5]})
         wandb.log({"timesteps before termination": t})
 
+
 def main(n_vehicles,host,world_port,tm_port):
-    train_PPO(host,world_port)
+    train_PPO(host, world_port)
     #random_baseline(host,world_port)
     #run_model(host,world_port)
+
 
 if __name__ == '__main__':
     import argparse
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--host', default='127.0.0.1')
-    parser.add_argument('--world_port', type=int, required=True)
-    parser.add_argument('--tm_port', type=int, required=True)
+    parser.add_argument('--world-port', type=int, required=True)
+    parser.add_argument('--tm-port', type=int, required=True)
     parser.add_argument('--n_vehicles', type=int, default=1)
 
     main(**vars(parser.parse_args()))

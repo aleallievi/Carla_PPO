@@ -37,8 +37,8 @@ Setting up remote pointer to source repo:
 
 Syncing local changes with source repo:
 ```
-git fetch upstream`
-git checkout master`
+git fetch upstream
+git checkout master
 git merge upstream/master
 ```
 

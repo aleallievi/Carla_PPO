@@ -2,3 +2,4 @@ __pycache__/
 **/slurm_scripts
 **/condor_scripts
 **/logs
+**/running_carla/wandb
