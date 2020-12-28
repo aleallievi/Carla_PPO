@@ -544,7 +544,8 @@ class CarEnv:
         self.spectator.set_transform(carla.Transform(self.car_agent.get_transform().location + carla.Location(z=2),
                                                      spectator_rot))
         self.car_agent.apply_control(carla.VehicleControl(throttle=action[0][0],steer=action[0][1]))
-        #time.sleep(1)
+        self.world.tick()
+
         velocity = self.car_agent.get_velocity()
 
         #get state information
@@ -801,6 +802,11 @@ def train_PPO(host, world_port):
         if (len(eps_frames) == 1):
             continue
 
+        discounted_reward = 0
+        for i in range (len(rewards)):
+            rewards[len(rewards)-1-i] = rewards[len(rewards)-1-i] + (gamma*discounted_reward)
+            discounted_reward = rewards[len(rewards)-1-i]
+
         rewards = torch.tensor(rewards).to(device)
         rewards = (rewards-rewards.mean())/rewards.std()
 
@@ -871,9 +877,8 @@ def random_baseline(host, world_port):
     lr = 0.0001
 
     config = wandb.config
-    config.learning_rate = lr
 
-    # wandb.watch(prev_policy)
+    #wandb.watch(prev_policy)
 
     for iters in range(n_iters):
         s = env.reset(False, False, iters)
@@ -905,8 +910,8 @@ def random_baseline(host, world_port):
 
 
 def main(n_vehicles,host,world_port,tm_port):
-    train_PPO(host, world_port)
-    #random_baseline(host,world_port)
+    #train_PPO(host,world_port)
+    random_baseline(host,world_port)
     #run_model(host,world_port)
 
 
