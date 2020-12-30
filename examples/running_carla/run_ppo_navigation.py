@@ -685,11 +685,12 @@ class PPO_Agent(nn.Module):
     def choose_action(self, frame, mes):
         #state = torch.FloatTensor(state.reshape(1, -1)).to(device)
         #state = torch.FloatTensor(state).to(device)
-        mean = self.actor(frame, mes)
-        cov_matrix = torch.diag(self.action_var)
-        gauss_dist = MultivariateNormal(mean, cov_matrix)
-        action = gauss_dist.sample()
-        action_log_prob = gauss_dist.log_prob(action)
+        with torch.no_grad():
+            mean = self.actor(frame,mes)
+            cov_matrix = torch.diag(self.action_var)
+            gauss_dist = MultivariateNormal(mean,cov_matrix)
+            action = gauss_dist.sample()
+            action_log_prob = gauss_dist.log_prob(action)
         return action, action_log_prob
 
     def get_training_params(self, frame, mes, action):
