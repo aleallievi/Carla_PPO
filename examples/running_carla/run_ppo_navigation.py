@@ -581,10 +581,10 @@ class CarEnv:
         command_encoded = self.command2onehot.get(self.high_level_command)
 
         #d2target = np.sqrt(np.power(self.car_agent.get_location().x-self.target.location.x,2)+np.power(self.car_agent.get_location().y-self.target.location.y,2)+np.power(self.car_agent.get_location().z-self.target.location.z,2))
-        d2target = self.statistics_manager.route_record["route_length"] - self.statistics_manager.compute_route_length(self.followed_waypoints)
-        self.d_completed = self.statistics_manager.compute_route_length(self.followed_waypoints)
-        velocity_kmh = int(3.6*np.sqrt(np.power(velocity.x,2) + np.power(velocity.y, 2) + np.power(velocity.z, 2)))
-        velocity_mag = np.sqrt(np.power(velocity.x,2) + np.power(velocity.y, 2) + np.power(velocity.z, 2))
+        d2target = self.statistics_manager.route_record["route_length"] - self.statistics_manager.compute_d2target(self.followed_waypoints)
+        self.d_completed = self.statistics_manager.compute_d2target(self.followed_waypoints)
+        velocity_kmh = int(3.6*np.sqrt(np.power(velocity.x,2) + np.power(velocity.y,2) + np.power(velocity.z,2)))
+        velocity_mag = np.sqrt(np.power(velocity.x,2) + np.power(velocity.y,2) + np.power(velocity.z,2))
         self.cur_velocity = velocity_mag
 
         state = [self.rgb_cam, velocity_mag, d2target]
@@ -948,12 +948,10 @@ def random_baseline(host, world_port):
         wandb.log({"number_of_times_vehicle_blocked": info[5]})
         wandb.log({"timesteps before termination": t})
 
-
-def main(n_vehicles, host, world_port, tm_port):
-    train_PPO(host, world_port)
-    # random_baseline(host,world_port)
-    # run_model(host,world_port)
-
+def main(n_vehicles,host,world_port,tm_port):
+    train_PPO(host,world_port)
+    #random_baseline(host,world_port)
+    #run_model(host,world_port)
 
 if __name__ == '__main__':
     import argparse
