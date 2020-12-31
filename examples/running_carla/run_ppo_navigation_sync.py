@@ -300,7 +300,6 @@ class CarlaEnv(object):
         # state = self.rgb_img # DEBUG
         state = [state, velocity_mag, d2target]
         state.extend(command_encoded)
-        # Image.fromarray(state[0][0]).save(f'Images/rgb_{time.time()}.png')
 
         #check for traffic light infraction/stoplight infraction
         self.check_traffic_light_infraction()
@@ -390,7 +389,6 @@ class CarlaEnv(object):
 
     def process_img(self, img, height, width, save_video):
         img = np.frombuffer(img.raw_data, dtype='uint8').reshape(height, width, 4)
-        # img = copy.deepcopy(img)
         rgb = img[:, :, :3]
         rgb = rgb[:, :, ::-1]
         return rgb
