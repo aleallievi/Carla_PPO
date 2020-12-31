@@ -163,7 +163,7 @@ class CarlaEnv(object):
             register_event(q.put)
             self._queues.append(q)
         # make_queue(self._world.on_tick)
-        for sensor in self._cameras:
+        for sensor in self._actor_dict['camera']:
             make_queue(sensor.listen)
 
         self.target_waypoint_idx = 0
