@@ -14,7 +14,8 @@ def launch_carla_server(world_port=8000, gpu=0, boot_time=10):
           f'--quality-level{{epic}} ' \
           f'--resx={800} ' \
           f'--resy={600} ' \
-          f'--gpu={gpu}'
+          f'--gpu={gpu}' \
+          f'--opengl'
 
     carla_process = subprocess.Popen(cmd.split(), stdout=subprocess.DEVNULL, preexec_fn=os.setsid)
     # give a few seconds to boot

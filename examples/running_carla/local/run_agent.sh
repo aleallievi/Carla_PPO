@@ -13,7 +13,7 @@ export PYTHONPATH=$PYTHONPATH:$CARLA_EGG
 export PYTHONPATH=$PYTHONPATH:$CARLA_DIR/PythonAPI/carla
 
 #Launch CARLA server
-python3 ${SCRIPTS_DIR}/launch_carla.py --world-port $WORLD_PORT --gpu 0
+python3 ${SCRIPTS_DIR}/launch_carla.py --world-port $WORLD_PORT --gpu 3
 
 #Launch CARLA client
-python3 ${AGENTS_DIR}/run_ppo_navigation.py --world-port $WORLD_PORT --tm-port $TM_PORT
+python3 ${AGENTS_DIR}/run_ppo_navigation_sync.py --world-port $WORLD_PORT --tm-port $TM_PORT

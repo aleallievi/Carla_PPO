@@ -25,6 +25,7 @@ height = 80
 width = 80
 fov = 10
 max_ep_length = 60
+frame_rate = 20.0      # in Hz
 FPS = 60
 
 class CarEnv:
@@ -33,14 +34,20 @@ class CarEnv:
     def __init__(self, host, world_port):
         self.client = carla.Client(host, world_port)
         self.client.set_timeout(10.0)
-        #self.world = self.client.get_world()
         self.world = self.client.load_world('Town01')
         self.spectator = self.world.get_spectator()
 
         self.blueprint_lib = self.world.get_blueprint_library()
         self.car_agent_model = self.blueprint_lib.filter("model3")[0]
 
-        self.command2onehot = {"RoadOption.LEFT":[0,0,0,0,0,1], "RoadOption.RIGHT":[0,0,0,0,1,0], "RoadOption.STRAIGHT":[0,0,0,1,0,0],"RoadOption.LANEFOLLOW":[0,0,1,0,0,0],"RoadOption.CHANGELANELEFT":[0,1,0,0,0,0],"RoadOption.CHANGELANERIGHT":[1,0,0,0,0,0]}
+        self.command2onehot =\
+            {"RoadOption.LEFT":             [0, 0, 0, 0, 0, 1],
+             "RoadOption.RIGHT":            [0, 0, 0, 0, 1, 0],
+             "RoadOption.STRAIGHT":         [0, 0, 0, 1, 0, 0],
+             "RoadOption.LANEFOLLOW":       [0, 0, 1, 0, 0, 0],
+             "RoadOption.CHANGELANELEFT":   [0, 1, 0, 0, 0, 0],
+             "RoadOption.CHANGELANERIGHT":  [1, 0, 0, 0, 0, 0]
+             }
 
         #get traffic light and stop sign info
         self._map = self.world.get_map()
@@ -66,8 +73,9 @@ class CarEnv:
         self.ALLOWED_OUT_DISTANCE = 1.3          # At least 0.5, due to the mini-shoulder between lanes and sidewalks
         self.MAX_ALLOWED_VEHICLE_ANGLE = 120.0   # Maximum angle between the yaw and waypoint lane
         self.MAX_ALLOWED_WAYPOINT_ANGLE = 150.0  # Maximum change between the yaw-lane angle between frames
-        self.WINDOWS_SIZE = 3 # Amount of additional waypoints checked (in case the first on fails)
+        self.WINDOWS_SIZE = 3   # Amount of additional waypoints checked (in case the first on fails)
 
+        # Get all static actors in world
         all_actors = self.world.get_actors()
         for _actor in all_actors:
             if 'traffic_light' in _actor.type_id:
@@ -136,8 +144,6 @@ class CarEnv:
 
     def reset(self, randomize, save_video, iter):
         if (randomize):
-            self.settings = self.world.get_settings()
-            self.settings.set(WeatherId=random.randrange(14))
             self.settings.set(SendNonPlayerAgentsInfo=True, NumberOfVehicles=random.randrange(30), NumberOfPedestrians=random.randrange(30), WeatherId=random.randrange(14))
             self.settings.randomize_seeds()
             self.world.apply_settings(self.settings)
@@ -153,6 +159,7 @@ class CarEnv:
         self.events = []
         self.followed_waypoints = []
         #spawn car randomly
+        random.seed(49)
         self.spawn_point = random.choice(self.world.get_map().get_spawn_points())
         self.car_agent = self.world.try_spawn_actor(self.car_agent_model, self.spawn_point)
         #handle invalid spwawn point
@@ -194,15 +201,16 @@ class CarEnv:
         self.actors.append(self.obs_sensor)
         self.obs_sensor.listen(lambda event: self.handle_obstacle(event))
 
-        while self.rgb_cam is None:
-            print("camera is not starting!")
-            time.sleep(0.01)
+        # while self.rgb_cam is None:
+        #     print("camera is not starting!")
+        #     time.sleep(0.01)
 
         self.episode_start = time.time()
         #workaround to get things started sooner
         self.car_agent.apply_control(carla.VehicleControl(throttle=0.0, brake=0.0))
 
         #create random target to reach
+        random.seed(0)
         self.target = random.choice(self.world.get_map().get_spawn_points())
         while (self.target == self.spawn_point):
             self.target = random.choice(self.world.get_map().get_spawn_points())
@@ -218,8 +226,8 @@ class CarEnv:
         self.n_stopsign_violations = 0
         self.n_route_violations = 0
         self.n_vehicle_blocked = 0
-
-        return [self.rgb_cam,0,0,0,0,0,0,0,0]
+        self.world.tick()
+        return [self.rgb_cam, 0, 0, 0, 0, 0, 0, 0, 0]
 
     def handle_collision (self,event):
         distance_vector = self.car_agent.get_location() - event.other_actor.get_location()
@@ -599,12 +607,17 @@ class CarEnv:
         return state, reward, done, [self.statistics_manager.route_record['route_percentage'], self.n_collisions, self.n_tafficlight_violations,self.n_stopsign_violations,self.n_route_violations,self.n_vehicle_blocked]
 
     def cleanup(self):
-        for actor in self.actors:
-            actor.destroy()
+        self.client.apply_batch([carla.command.DestroyActor(x) for x in self.actors])
+        # for actor in self.actors:
+        #     actor.destroy()
         #end video
         if self.out != None:
             self.out.release()
             #cv2.destroyAllWindows()
+        self.settings = self.world.get_settings()
+        self.settings.synchronous_mode = False
+        self.settings.fixed_delta_seconds = None
+        self.world.apply_settings(self.settings)
 
     def get_route(self):
         map = self.world.get_map()
@@ -617,13 +630,16 @@ class CarEnv:
         self.route_commands = []
         self.route_waypoints_unformatted = []
         for waypoint in route.keys():
-            self.route_waypoints.append((waypoint.transform.location.x,waypoint.transform.location.y,waypoint.transform.location.z))
+            self.route_waypoints.append((waypoint.transform.location.x, waypoint.transform.location.y, waypoint.transform.location.z))
             self.route_commands.append(route.get(waypoint))
             self.route_waypoints_unformatted.append(waypoint)
         self.route_kdtree = KDTree(np.array(self.route_waypoints))
 
-device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+
+device = torch.device("cuda:2" if torch.cuda.is_available() else "cpu")
 # device = torch.device("cpu")
+
+
 class PPO_Agent(nn.Module):
     def __init__(self, linear_state_dim, action_dim, action_std):
         super(PPO_Agent, self).__init__()
@@ -713,9 +729,10 @@ class PPO_Agent(nn.Module):
         state_value = torch.squeeze(self.critic(frame, mes)).to(device)
         return action_log_prob, state_value, entropy
 
+
 def format_frame(frame):
     frame = torch.FloatTensor(frame)
-    h,w,c = frame.shape
+    h, w, c = frame.shape
     frame = frame.unsqueeze(0).view(1, c, h, w)
     return frame
 
@@ -778,12 +795,12 @@ def train_PPO(host, world_port):
             actions_log_probs.append(a_log_prob)
             rewards.append(reward)
             states_p.append(s_prime)
-
             s = s_prime
             t += 1
             episode_reward += reward
 
         env.cleanup()
+
         if t == 1:
             continue
         print("Episode reward: " + str(episode_reward))
@@ -800,13 +817,15 @@ def train_PPO(host, world_port):
         wandb.log({"number_of_route_violations": info[4]})
         wandb.log({"number_of_times_vehicle_blocked": info[5]})
         wandb.log({"timesteps before termination": t})
+
         if (len(eps_frames) == 1):
             continue
 
         discounted_reward = 0
-        for i in range (len(rewards)):
+        for i in range(len(rewards)):
             rewards[len(rewards)-1-i] = rewards[len(rewards)-1-i] + (gamma*discounted_reward)
             discounted_reward = rewards[len(rewards)-1-i]
+        # rewards = [episode_reward - r for r in rewards] ToDo: check that this is equivalent to the above
 
         rewards = torch.tensor(rewards).to(device)
         rewards = (rewards-rewards.mean())/rewards.std()
@@ -819,7 +838,7 @@ def train_PPO(host, world_port):
             policy_ratio = torch.exp(current_action_log_probs - actions_log_probs.detach())
             #policy_ratio = current_action_log_probs.detach()/actions_log_probs
             advantage = rewards - state_values.detach()
-
+            advantage = (advantage - advantage.mean()) / advantage.std()
             update1 = (policy_ratio*advantage).float()
             update2 = (torch.clamp(policy_ratio, 1-clip_val, 1+clip_val) * advantage).float()
             loss = -torch.min(update1, update2) + 0.5*mse(state_values.float(), rewards.float()) - 0.001*entropies
@@ -910,10 +929,10 @@ def random_baseline(host, world_port):
         wandb.log({"timesteps before termination": t})
 
 
-def main(n_vehicles,host,world_port,tm_port):
-    #train_PPO(host,world_port)
-    random_baseline(host,world_port)
-    #run_model(host,world_port)
+def main(n_vehicles, host, world_port, tm_port):
+    train_PPO(host, world_port)
+    # random_baseline(host,world_port)
+    # run_model(host,world_port)
 
 
 if __name__ == '__main__':
