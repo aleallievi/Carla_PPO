@@ -24,12 +24,13 @@ from agents.navigation.global_route_planner_dao import GlobalRoutePlannerDAO
 from scripts.launch_carla import launch_carla_server
 from scripts.kill_carla import kill_carla
 from PIL import Image, ImageDraw
+import copy
 
 
 class CarlaEnv(object):
     def __init__(self, args, town='Town01'):
         # Tunable parameters
-        self.FRAME_RATE = 30.0  # in Hz
+        self.FRAME_RATE = 5.0  # in Hz
         self.MAX_EP_LENGTH = 60  # in seconds
         self.MAX_EP_LENGTH = self.MAX_EP_LENGTH / (1.0 / self.FRAME_RATE)  # convert to ticks
 
@@ -135,7 +136,10 @@ class CarlaEnv(object):
 
         self._spawn_car_agent()
         print('car agent spawned')
-        self._setup_sensors(iter=i)
+        self._setup_sensors()
+        print('sensors created')
+        for i in range(10):
+            self._world.tick()
 
         # create random target to reach
         np.random.seed(6)
@@ -184,7 +188,7 @@ class CarlaEnv(object):
             self._car_agent = self._world.try_spawn_actor(self._car_agent_model, self._start_pose)
         self._actor_dict['car_agent'].append(self._car_agent)
 
-    def _setup_sensors(self, save_video=False, height=80, width=80, fov=10, FPS=60, iter=0):
+    def _setup_sensors(self, height=80, width=80, fov=10):
         sensor_relative_transform = carla.Transform(carla.Location(x=2.5, z=0.7))
 
         # get camera sensor
@@ -206,7 +210,6 @@ class CarlaEnv(object):
         self._obs_sensor = self._world.spawn_actor(obs_sensor_bp, sensor_relative_transform, attach_to=self._car_agent)
         self._actor_dict['obs_sensor'].append(self._obs_sensor)
         self._obs_sensor.listen(lambda event: self.handle_obstacle(event))
-
 
     def _retrieve_data(self, sensor_queue, timeout):
         while True:
@@ -289,13 +292,13 @@ class CarlaEnv(object):
         velocity_mag = np.sqrt(np.power(velocity.x, 2) + np.power(velocity.y, 2) + np.power(velocity.z, 2))
         self.cur_velocity = velocity_mag
 
-
         state = [self._retrieve_data(q, timeout) for q in self._queues]
         assert all(x.frame == self.frame for x in state)
         state = [self.process_img(img, 80, 80, False) for img in state]
         # state = self.rgb_img # DEBUG
         state = [state, velocity_mag, d2target]
         state.extend(command_encoded)
+        # Image.fromarray(state[0][0]).save(f'Images/rgb_{time.time()}.png')
 
         #check for traffic light infraction/stoplight infraction
         self.check_traffic_light_infraction()
@@ -385,6 +388,7 @@ class CarlaEnv(object):
 
     def process_img(self, img, height, width, save_video):
         img = np.frombuffer(img.raw_data, dtype='uint8').reshape(height, width, 4)
+        # img = copy.deepcopy(img)
         rgb = img[:, :, :3]
         rgb = rgb[:, :, ::-1]
         return rgb
@@ -851,6 +855,7 @@ class PPO_Agent(nn.Module):
 
 
 def format_frame(frame):
+    # Image.fromarray(frame[0]).save(f'Images/rgb_{time.time()}.png')
     frame = torch.FloatTensor(frame.copy())
     _, h, w, c = frame.shape
     frame = frame.unsqueeze(0).view(1, c, h, w)
@@ -867,7 +872,7 @@ def train_PPO(args):
     n_iters = 10000
     n_epochs = 50
     max_steps = 2000
-    gamma = 0.99
+    gamma = 1
     lr = 0.0001
     clip_val = 0.2
     avg_t = 0
@@ -881,7 +886,7 @@ def train_PPO(args):
     #currently the action array will be [throttle, steer]
     n_actions = 2
 
-    action_std = 0.5
+    action_std = 0.2
     #init models
     policy = PPO_Agent(n_states, n_actions, action_std).to(device)
 
@@ -894,89 +899,136 @@ def train_PPO(args):
     wandb.watch(prev_policy)
 
     for iters in range(n_iters):
-        # if iters % 50 == 0:
+        # # CARLA server becomes slower
+        # if iters % 50 == 0 and iters > 0:
         #     kill_carla()
         #     launch_carla_server(args.world_port, gpu=3, boot_time=5)
+        #     args.client = launch_client(args)
         with CarlaEnv(args) as env:
             s, _, _, _ = env.reset(False, False, iters)
             t = 0
-            episode_reward = 0
+            episode_return = 0
             done = False
             rewards = []
             eps_frames = []
+            eps_frames_raw = []
             eps_mes = []
+            eps_mes_raw = []
             actions = []
             actions_log_probs = []
             states_p = []
             while not done:
                 a, a_log_prob = prev_policy.choose_action(format_frame(s[0]), format_mes(s[1:]))
                 s_prime, reward, done, info = env.step(action=a.detach().tolist(), timeout=2)
-
                 # if reward != 0:
                 #     print('reward is:', reward)
-                eps_frames.append(format_frame(s[0]))
-                eps_mes.append(format_mes(s[1:]))
-                actions.append(a)
-                actions_log_probs.append(a_log_prob)
-                rewards.append(reward)
-                states_p.append(s_prime)
-                s = s_prime
+                eps_frames.append(copy.deepcopy(format_frame(s[0])))
+                eps_frames_raw.append(copy.deepcopy(s[0]))
+                eps_mes.append(copy.deepcopy(format_mes(s[1:])))
+                eps_mes_raw.append(copy.deepcopy(s[1:]))
+                actions.append(copy.deepcopy(a))
+                actions_log_probs.append(copy.deepcopy(a_log_prob))
+                rewards.append(copy.deepcopy(reward))
+                states_p.append(copy.deepcopy(s_prime))
+                # Image.fromarray(states_p[t][0][0]).save(f'Images/rgb_{time.time()}.png')
+                s = copy.deepcopy(s_prime)
+                # Image.fromarray(eps_frames_raw[t][0]).save(f'Images/{t}_rgb_{time.time()}.png')
                 t += 1
-                episode_reward += reward
+                episode_return += reward
         if t == 1:
             continue
-        print("Episode reward: " + str(episode_reward))
+        # [Image.fromarray(eps_frames_raw[img][0]).save(f'Images/{iters}_{img}_rgb_{time.time()}.png') for img in [0, 1, 2, 3, 4, 5, -1]]
+        # Image.fromarray(eps_frames_raw[0][0]).save(f'Images/{iters}_0_rgb_{time.time()}.png')
+        # input('check imgs')
+        print("Episode return: " + str(episode_return))
         print("Percent completed: " + str(info[0]))
         avg_t += t
-        moving_avg = (episode_reward - moving_avg) * (2/(iters+2)) + moving_avg
-
-        wandb.log({"episode_reward (suggested reward w/ ri)": episode_reward})
-        wandb.log({"average_reward (suggested reward w/ ri)": moving_avg})
-        wandb.log({"percent_completed": info[0]})
-        wandb.log({"number_of_collisions": info[1]})
-        wandb.log({"number_of_trafficlight_violations": info[2]})
-        wandb.log({"number_of_stopsign_violations": info[3]})
-        wandb.log({"number_of_route_violations": info[4]})
-        wandb.log({"number_of_times_vehicle_blocked": info[5]})
-        wandb.log({"timesteps before termination": t})
-        wandb.log({"iteration": iters})
-
+        moving_avg = (episode_return - moving_avg) * (2/(iters+2)) + moving_avg
         if len(eps_frames) == 1:
             continue
-
-        discounted_reward = 0
-        for i in range(len(rewards)):
-            rewards[len(rewards)-1-i] = rewards[len(rewards)-1-i] + (gamma*discounted_reward)
-            discounted_reward = rewards[len(rewards)-1-i]
-        # rewards = [episode_reward - r for r in rewards] ToDo: check that this is equivalent to the above
-
-        rewards = torch.tensor(rewards).to(device)
-        rewards = (rewards-rewards.mean())/rewards.std()
-
+        returns = discount_rewards(rewards, gamma)
+        returns = torch.tensor(returns).to(device)
         actions_log_probs = torch.FloatTensor(actions_log_probs).to(device)
+
         #train PPO
         for i in range(n_epochs):
             current_action_log_probs, state_values, entropies = policy.get_training_params(eps_frames, eps_mes, actions)
 
             policy_ratio = torch.exp(current_action_log_probs - actions_log_probs.detach())
             #policy_ratio = current_action_log_probs.detach()/actions_log_probs
-            advantage = rewards - state_values.detach()
+            # _, advantage = get_advantages(rewards, state_values.detach(), gamma)
+            # policy_ratio = (policy_ratio - policy_ratio.mean()) / policy_ratio.std()
+            advantage = returns - state_values.detach()
             advantage = (advantage - advantage.mean()) / advantage.std()
             update1 = (policy_ratio*advantage).float()
             update2 = (torch.clamp(policy_ratio, 1-clip_val, 1+clip_val) * advantage).float()
-            loss = -torch.min(update1, update2) + 0.5*mse(state_values.float(), rewards.float()) - 0.001*entropies
+            chosen_update = torch.min(update1, update2)
 
+            # mins = torch.min(torch.abs(update1), torch.abs(update2))
+            #
+            # xSigns = (mins == torch.abs(update1)) * torch.sign(update1)
+            # ySigns = (mins == torch.abs(update2)) * torch.sign(update2)
+            # finalSigns = xSigns.int() | ySigns.int()
+            #
+            # chosen_update = mins * finalSigns
 
+            loss = -chosen_update \
+                + 0.5*mse(state_values.float(), returns.float()) \
+                - 0.001*entropies
+
+            if i == 0:
+                returns_init = returns.clone()
+                state_values_init = state_values.clone()
+                loss_init = loss.clone()
             optimizer.zero_grad()
             loss.mean().backward()
             optimizer.step()
             if i % 10 == 0:
                 print("    on epoch " + str(i))
             #wandb.log({"loss": loss.mean()})
+        wandb.log({"episode_return (suggested reward w/ ri)": episode_return,
+                   "average_return (suggested reward w/ ri)": moving_avg,
+                   "percent_completed": info[0],
+                   "number_of_collisions": info[1],
+                   "number_of_trafficlight_violations": info[2],
+                   "number_of_stopsign_violations": info[3],
+                   "number_of_route_violations": info[4],
+                   "number_of_times_vehicle_blocked": info[5],
+                   "timesteps before termination": t,
+                   # "Step": iters,
+                   # 'returns_max': returns.max(),
+                   # 'returns_min': returns.min(),
+                   # 'returns_mean': returns.mean(),
+                   # 'values_max': state_values.max(),
+                   # 'values_min': state_values.min(),
+                   # 'values_mean': state_values.mean(),
+                   # 'loss_adv_1': -update1.mean(),
+                   # 'loss_adv_2_clipped': -update2.mean(),
+                   'loss_adv_chosen': -chosen_update.mean(),
+                   'loss_v': (0.5 * mse(state_values.float(), returns.float())),
+                   'loss_ent': (- 0.001*entropies).mean(),
+                   'loss_mean': loss.mean(),
+                   'returns_init': returns_init.mean(),
+                   'state_val_init': state_values_init.mean(),
+                   'loss_init': loss_init.mean(),
+                   'Sample image': [wandb.Image(eps_frames_raw[img][0], caption=f'Img#: {len(eps_frames_raw)*(-img)}') for img in [0, -1]],
+                   })
 
         if iters % 50 == 0:
             torch.save(policy.state_dict(), "policy_state_dictionary.pt")
         prev_policy.load_state_dict(policy.state_dict())
+
+
+def discount_rewards(r, gamma):
+    """ take 1D float array of rewards and compute discounted reward """
+    # from https://github.com/GoogleCloudPlatform/tensorflow-without-a-phd/blob/master/tensorflow-rl-pong/trainer/helpers.py
+    r = np.array(r)
+    discounted_r = np.zeros_like(r)
+    running_add = 0
+    for t in reversed(range(0, r.size)):
+        running_add = running_add * gamma + r[t]
+        discounted_r[t] = running_add
+    return discounted_r.tolist()
 
 
 def launch_client(args):
