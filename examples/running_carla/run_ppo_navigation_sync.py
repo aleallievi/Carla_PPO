@@ -28,6 +28,7 @@ import copy
 
 global device
 
+
 class CarlaEnv(object):
     def __init__(self, args, town='Town01'):
         # Tunable parameters
@@ -1032,6 +1033,5 @@ if __name__ == '__main__':
     parser.add_argument('--tm-port', type=int, required=True)
     parser.add_argument('--n_vehicles', type=int, default=1)
     parser.add_argument('--client_timeout', type=int, default=10)
-
 
     main(parser.parse_args())
