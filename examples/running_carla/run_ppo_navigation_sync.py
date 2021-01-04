@@ -26,6 +26,7 @@ from scripts.kill_carla import kill_carla
 from PIL import Image, ImageDraw
 import copy
 
+global device
 
 class CarlaEnv(object):
     def __init__(self, args, town='Town01'):
@@ -760,10 +761,6 @@ class CarlaEnv(object):
         return am_ab > 0 and am_ab < ab_ab and am_ad > 0 and am_ad < ad_ad
 
 
-device = torch.device("cuda:2" if torch.cuda.is_available() else "cpu")
-# device = torch.device("cpu")
-
-
 class PPO_Agent(nn.Module):
     def __init__(self, linear_state_dim, action_dim, action_std):
         super(PPO_Agent, self).__init__()
@@ -823,11 +820,9 @@ class PPO_Agent(nn.Module):
         return self.criticLin(X)
 
     def choose_action(self, frame, mes):
-        #state = torch.FloatTensor(state.reshape(1, -1)).to(device)
-        #state = torch.FloatTensor(state).to(device)
         with torch.no_grad():
             mean = self.actor(frame, mes)
-            cov_matrix = torch.diag(self.action_var)
+            cov_matrix = torch.diag(self.action_var).to(device)
             gauss_dist = MultivariateNormal(mean, cov_matrix)
             action = gauss_dist.sample()
             action_log_prob = gauss_dist.log_prob(action)
@@ -855,7 +850,6 @@ class PPO_Agent(nn.Module):
 
 
 def format_frame(frame):
-    # Image.fromarray(frame[0]).save(f'Images/rgb_{time.time()}.png')
     frame = torch.FloatTensor(frame.copy())
     _, h, w, c = frame.shape
     frame = frame.unsqueeze(0).view(1, c, h, w)
@@ -883,10 +877,12 @@ def train_PPO(args):
 
 
     n_states = 8
+
     #currently the action array will be [throttle, steer]
     n_actions = 2
 
     action_std = 0.2
+
     #init models
     policy = PPO_Agent(n_states, n_actions, action_std).to(device)
 
@@ -899,11 +895,6 @@ def train_PPO(args):
     wandb.watch(prev_policy)
 
     for iters in range(n_iters):
-        # # CARLA server becomes slower
-        # if iters % 50 == 0 and iters > 0:
-        #     kill_carla()
-        #     launch_carla_server(args.world_port, gpu=3, boot_time=5)
-        #     args.client = launch_client(args)
         with CarlaEnv(args) as env:
             s, _, _, _ = env.reset(False, False, iters)
             t = 0
@@ -920,26 +911,19 @@ def train_PPO(args):
             while not done:
                 a, a_log_prob = prev_policy.choose_action(format_frame(s[0]), format_mes(s[1:]))
                 s_prime, reward, done, info = env.step(action=a.detach().tolist(), timeout=2)
-                # if reward != 0:
-                #     print('reward is:', reward)
-                eps_frames.append(copy.deepcopy(format_frame(s[0])))
+                eps_frames.append(format_frame(s[0]).detach().clone())
                 eps_frames_raw.append(copy.deepcopy(s[0]))
-                eps_mes.append(copy.deepcopy(format_mes(s[1:])))
+                eps_mes.append(format_mes(s[1:]).detach().clone())
                 eps_mes_raw.append(copy.deepcopy(s[1:]))
-                actions.append(copy.deepcopy(a))
-                actions_log_probs.append(copy.deepcopy(a_log_prob))
+                actions.append(a.detach().clone())
+                actions_log_probs.append(a_log_prob.detach().clone())
                 rewards.append(copy.deepcopy(reward))
                 states_p.append(copy.deepcopy(s_prime))
-                # Image.fromarray(states_p[t][0][0]).save(f'Images/rgb_{time.time()}.png')
                 s = copy.deepcopy(s_prime)
-                # Image.fromarray(eps_frames_raw[t][0]).save(f'Images/{t}_rgb_{time.time()}.png')
                 t += 1
                 episode_return += reward
         if t == 1:
             continue
-        # [Image.fromarray(eps_frames_raw[img][0]).save(f'Images/{iters}_{img}_rgb_{time.time()}.png') for img in [0, 1, 2, 3, 4, 5, -1]]
-        # Image.fromarray(eps_frames_raw[0][0]).save(f'Images/{iters}_0_rgb_{time.time()}.png')
-        # input('check imgs')
         print("Episode return: " + str(episode_return))
         print("Percent completed: " + str(info[0]))
         avg_t += t
@@ -955,64 +939,52 @@ def train_PPO(args):
             current_action_log_probs, state_values, entropies = policy.get_training_params(eps_frames, eps_mes, actions)
 
             policy_ratio = torch.exp(current_action_log_probs - actions_log_probs.detach())
-            #policy_ratio = current_action_log_probs.detach()/actions_log_probs
-            # _, advantage = get_advantages(rewards, state_values.detach(), gamma)
-            # policy_ratio = (policy_ratio - policy_ratio.mean()) / policy_ratio.std()
             advantage = returns - state_values.detach()
             advantage = (advantage - advantage.mean()) / advantage.std()
-            update1 = (policy_ratio*advantage).float()
-            update2 = (torch.clamp(policy_ratio, 1-clip_val, 1+clip_val) * advantage).float()
-            chosen_update = torch.min(update1, update2)
+            adv_l_update1 = policy_ratio*advantage.float()
+            adv_l_update2 = (torch.clamp(policy_ratio, 1-clip_val, 1+clip_val) * advantage).float()
+            adv_l = torch.min(adv_l_update1, adv_l_update2)
+            loss_v = 0.5 * mse(state_values.float(), returns.float())
 
-            # mins = torch.min(torch.abs(update1), torch.abs(update2))
-            #
-            # xSigns = (mins == torch.abs(update1)) * torch.sign(update1)
-            # ySigns = (mins == torch.abs(update2)) * torch.sign(update2)
-            # finalSigns = xSigns.int() | ySigns.int()
-            #
-            # chosen_update = mins * finalSigns
+            loss = -adv_l \
+                + loss_v \
+                - 0.001 * entropies
 
-            loss = -chosen_update \
-                + 0.5*mse(state_values.float(), returns.float()) \
-                - 0.001*entropies
-
-            if i == 0:
-                returns_init = returns.clone()
-                state_values_init = state_values.clone()
-                loss_init = loss.clone()
             optimizer.zero_grad()
             loss.mean().backward()
             optimizer.step()
             if i % 10 == 0:
                 print("    on epoch " + str(i))
             #wandb.log({"loss": loss.mean()})
-        wandb.log({"episode_return (suggested reward w/ ri)": episode_return,
-                   "average_return (suggested reward w/ ri)": moving_avg,
-                   "percent_completed": info[0],
-                   "number_of_collisions": info[1],
-                   "number_of_trafficlight_violations": info[2],
-                   "number_of_stopsign_violations": info[3],
-                   "number_of_route_violations": info[4],
-                   "number_of_times_vehicle_blocked": info[5],
-                   "timesteps before termination": t,
-                   # "Step": iters,
-                   # 'returns_max': returns.max(),
-                   # 'returns_min': returns.min(),
-                   # 'returns_mean': returns.mean(),
-                   # 'values_max': state_values.max(),
-                   # 'values_min': state_values.min(),
-                   # 'values_mean': state_values.mean(),
-                   # 'loss_adv_1': -update1.mean(),
-                   # 'loss_adv_2_clipped': -update2.mean(),
-                   'loss_adv_chosen': -chosen_update.mean(),
-                   'loss_v': (0.5 * mse(state_values.float(), returns.float())),
-                   'loss_ent': (- 0.001*entropies).mean(),
-                   'loss_mean': loss.mean(),
-                   'returns_init': returns_init.mean(),
-                   'state_val_init': state_values_init.mean(),
-                   'loss_init': loss_init.mean(),
-                   'Sample image': [wandb.Image(eps_frames_raw[img][0], caption=f'Img#: {len(eps_frames_raw)*(-img)}') for img in [0, -1]],
-                   })
+
+        wandb.log({
+            "episode_return (suggested reward w/ ri)": episode_return,
+            "average_return (suggested reward w/ ri)": moving_avg,
+            # "percent_completed": info[0],
+            # "number_of_collisions": info[1],
+            # "number_of_trafficlight_violations": info[2],
+            # "number_of_stopsign_violations": info[3],
+            # "number_of_route_violations": info[4],
+            # "number_of_times_vehicle_blocked": info[5],
+            # "timesteps before termination": t,
+            # "Step": iters,
+            # 'returns_max': returns.max(),
+            # 'returns_min': returns.min(),
+            # 'returns_mean': returns.mean(),
+            # 'values_max': state_values.max(),
+            # 'values_min': state_values.min(),
+            # 'values_mean': state_values.mean(),
+            'policy_ratio': policy_ratio.mean(),
+            'advantage': advantage.mean(),
+            'loss_adv_1': adv_l_update1.mean(),
+            'loss_adv_2_clipped': adv_l_update2.mean(),
+            'loss_adv_chosen': adv_l.mean(),
+            # 'loss_v': (0.5 * mse(state_values.float(), returns.float())),
+            'loss_v': loss_v,
+            'loss_ent': (- 0.001*entropies).mean(),
+            'loss_mean': loss.mean(),
+            'Sample image': [wandb.Image(eps_frames_raw[img][0], caption=f'Img#: {len(eps_frames_raw)*(-img)}') for img in [0, -1]],
+        })
 
         if iters % 50 == 0:
             torch.save(policy.state_dict(), "policy_state_dictionary.pt")
@@ -1038,6 +1010,11 @@ def launch_client(args):
 
 
 def main(args):
+    global device
+    # set GPU to be used for policy gradient backprop
+    device = torch.device(f"cuda:{args.client_gpu}" if torch.cuda.is_available() else "cpu")
+    # device = torch.device("cpu")
+
     # Create client outside of Carla environment to avoid creating zombie clients
     args.client = launch_client(args)
     train_PPO(args)
@@ -1049,10 +1026,12 @@ if __name__ == '__main__':
     import argparse
 
     parser = argparse.ArgumentParser()
+    parser.add_argument('--client-gpu', type=int, default=0)
     parser.add_argument('--host', default='127.0.0.1')
     parser.add_argument('--world-port', type=int, required=True)
     parser.add_argument('--tm-port', type=int, required=True)
     parser.add_argument('--n_vehicles', type=int, default=1)
     parser.add_argument('--client_timeout', type=int, default=10)
+
 
     main(parser.parse_args())
