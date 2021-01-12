@@ -18,7 +18,7 @@ class StatisticManager:
         self.PENALTY_TRAFFIC_LIGHT = 0.70
         self.PENALTY_STOP = 0.80
         self.prev_route_infractions = 0
-        self.prev_route_completion = 0
+        # self.prev_route_completion = 0
 
     def compute_route_length(self, trajectory):
         route_length = 0.0
@@ -106,11 +106,13 @@ class StatisticManager:
                 elif event[0] == TrafficEventType.ROUTE_COMPLETED:
                     score_route = 100.0
                     target_reached = True
+
                 elif event[0] == TrafficEventType.ROUTE_COMPLETION:
                     if not target_reached:
-                        score_route = (event[1]/self.route_record['route_length'])*100
-                        #score_route = (event[1]/self.route_record['route_length'])*100 - self.prev_route_completion
-                        self.prev_route_completion = (event[1]/self.route_record['route_length'])*100
+                        score_route = event[1]
+                        # score_route = (event[1]/self.route_record['route_length'])*100
+                        # score_route = (event[1]/self.route_record['route_length'])*100 - self.prev_route_completion
+                        # self.prev_route_completion = score_route
 
 
             # update route scores
@@ -124,7 +126,7 @@ class StatisticManager:
                 except ZeroDivisionError:
                     self.route_record['score_composed'] = score_route
 
-            self.route_record['route_percentage'] = self.prev_route_completion
+            self.route_record['route_percentage'] = score_route
 
             # update status
             if target_reached:

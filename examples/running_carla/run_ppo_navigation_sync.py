@@ -24,6 +24,9 @@ from agents.navigation.global_route_planner_dao import GlobalRoutePlannerDAO
 from scripts.launch_carla import launch_carla_server
 from scripts.kill_carla import kill_carla
 from PIL import Image, ImageDraw
+
+from score_tests import RouteCompletionTest
+
 import copy
 
 global device
@@ -37,8 +40,6 @@ class CarlaEnv(object):
         self.MAX_EP_LENGTH = self.MAX_EP_LENGTH / (1.0 / self.FRAME_RATE)  # convert to ticks
 
         self._client = args.client
-
-        self._statistics_manager = StatisticManager
 
         self._town_name = town
         self._world = self._client.load_world(town)
@@ -177,6 +178,8 @@ class CarlaEnv(object):
         self.followed_target_waypoints = []
         self.dist_to_target_wp_tr = None
 
+        self.completion_test = RouteCompletionTest(self._car_agent, self.route_waypoints_unformatted, self._map)
+
     def reset(self, randomize, save_video, i):
         # self._cleanup()
         # self.init()
@@ -241,58 +244,12 @@ class CarlaEnv(object):
         transform = self._car_agent.get_transform()
         velocity = self._car_agent.get_velocity()
 
-        # set current waypoint to closest waypoint to agent position
-        closest_index = self.route_kdtree.query([[self._car_agent.get_location().x, self._car_agent.get_location().y,
-                                                  self._car_agent.get_location().z]], k=1)[1][0][0]
-        self.at_waypoint = self.route_waypoints[closest_index]
-        self.followed_waypoints.append(self.at_waypoint)
-
-        # get command of current waypoint
-        command_encoded = self.command2onehot.get(str(self.route_commands[closest_index]))
-
-
-        # get next target waypoint assuming they are ordered by the route planner
-        self.target_waypoint = self.route_waypoints[self.target_waypoint_idx]
-
-        if self.at_waypoint == self.target_waypoint:
-            self.followed_target_waypoints.append(self.target_waypoint)
-            self.target_waypoint_idx += 1
-            self.target_waypoint = self.route_waypoints[self.target_waypoint_idx]
-            car_agent_trigger_pos = [self._car_agent.get_location().x, self._car_agent.get_location().y, self._car_agent.get_location().z]
-            self.dist_to_target_wp_tr = self.statistics_manager.compute_route_length([car_agent_trigger_pos, self.target_waypoint])
-
-        car_agent_x = self._car_agent.get_location().x
-        car_agent_y = self._car_agent.get_location().y
-        car_agent_z = self._car_agent.get_location().z
-
-        target_x, target_y, target_z = self.target_waypoint
-        dist_x2 = (car_agent_x - target_x)**2
-        dist_y2 = (car_agent_y - target_y)**2
-        dist_z2 = (car_agent_z - target_z)**2
-        dist_to_target_wp = math.sqrt(dist_x2 + dist_y2 + dist_z2)
-        # input(dist_to_next_wp)
-
-        if self.dist_to_target_wp_tr:
-            # print(self.dist_to_target_wp_tr)
-            # print(dist_to_target_wp)
-            dist_toward_target_wp = self.dist_to_target_wp_tr - dist_to_target_wp
-        else:
-            dist_toward_target_wp = 0
-
-        # compute completed distance based on followed target waypoints TODO change to include negative progress
-        # print(self.statistics_manager.compute_route_length(self.followed_target_waypoints))
-        # print(dist_toward_target_wp)
-        self.d_completed = (self.statistics_manager.compute_route_length(self.followed_target_waypoints) + dist_toward_target_wp)
-        # if self.at_waypoint == self.target_waypoint:
-        #     print('completed distance is:', self.d_completed)
-        # print('completed distance is:', self.d_completed)
-        # get distance to destination TODO change formula for this
-        d2target = self.statistics_manager.route_record["route_length"] - \
-                   self.d_completed
-
         velocity_kmh = int(3.6*np.sqrt(np.power(velocity.x, 2) + np.power(velocity.y, 2) + np.power(velocity.z, 2)))
         velocity_mag = np.sqrt(np.power(velocity.x, 2) + np.power(velocity.y, 2) + np.power(velocity.z, 2))
         self.cur_velocity = velocity_mag
+
+        command_encoded, d2target = self.get_route_completion()
+        completed = self.completion_test.update()
 
         state = [self._retrieve_data(q, timeout) for q in self._queues]
         assert all(x.frame == self.frame for x in state)
@@ -310,20 +267,25 @@ class CarlaEnv(object):
         #get done information
         if self._tick > self.MAX_EP_LENGTH or self.colllided_w_static:
             done = True
-            self.events.append([TrafficEventType.ROUTE_COMPLETION, self.d_completed])
+            self.events.append([TrafficEventType.ROUTE_COMPLETION, completed])
         elif d2target < 0.1:
             done = True
             self.events.append([TrafficEventType.ROUTE_COMPLETED])
         else:
             done = False
-            self.events.append([TrafficEventType.ROUTE_COMPLETION, self.d_completed])
+            self.events.append([TrafficEventType.ROUTE_COMPLETION, completed])
 
         # print(self.events)
         #get reward information
         self.statistics_manager.compute_route_statistics(time.time(), self.events)
         #------------------------------------------------------------------------------------------------------------------
         reward = self.statistics_manager.route_record["score_composed"] - self.statistics_manager.prev_score
-
+        # DEBUG
+        # if reward != 0:
+        #     print(f'score_route:{self.statistics_manager.route_record["score_route"]}')
+        #     print(f'score_penalty:{self.statistics_manager.route_record["score_penalty"]}')
+        #     print(f'score_composed:{self.statistics_manager.route_record["score_composed"]}')
+        #     print(f'prev_score:{self.statistics_manager.prev_score}')
         self.statistics_manager.prev_score = self.statistics_manager.route_record["score_composed"]
         #reward = self.statistics_manager.route_record["score_composed"]
         #self.events.clear()
@@ -337,7 +299,9 @@ class CarlaEnv(object):
             self.blocked = False
             self.blocked_start = 0
         self.n_step_cols = 0
-        return state, reward, done, [self.statistics_manager.route_record['route_percentage'], self.n_collisions,
+
+        return state, reward, done, [self.statistics_manager.route_record["score_composed"],
+                                     self.statistics_manager.route_record['route_percentage'], self.n_collisions,
                                      self.n_tafficlight_violations, self.n_stopsign_violations, self.n_route_violations,
                                      self.n_vehicle_blocked]
 
@@ -372,7 +336,7 @@ class CarlaEnv(object):
         return frame
 
     def get_route(self):
-        dao = GlobalRoutePlannerDAO(self._map, 2)
+        dao = GlobalRoutePlannerDAO(self._map, 0.5)
         grp = GlobalRoutePlanner(dao)
         grp.setup()
         route = dict(grp.trace_route(self._start_pose.location, self._target_pose.location))
@@ -759,6 +723,58 @@ class CarlaEnv(object):
 
         return am_ab > 0 and am_ab < ab_ab and am_ad > 0 and am_ad < ad_ad
 
+    def get_route_completion(self):
+        # set current waypoint to closest waypoint to agent position
+        closest_index = self.route_kdtree.query([[self._car_agent.get_location().x, self._car_agent.get_location().y,
+                                                  self._car_agent.get_location().z]], k=1)[1][0][0]
+        self.at_waypoint = self.route_waypoints[closest_index]
+        self.followed_waypoints.append(self.at_waypoint)
+
+        # get command of current waypoint
+        command_encoded = self.command2onehot.get(str(self.route_commands[closest_index]))
+
+
+        # get next target waypoint assuming they are ordered by the route planner
+        self.target_waypoint = self.route_waypoints[self.target_waypoint_idx]
+
+        if self.at_waypoint == self.target_waypoint:
+            self.followed_target_waypoints.append(self.target_waypoint)
+            self.target_waypoint_idx += 1
+            self.target_waypoint = self.route_waypoints[self.target_waypoint_idx]
+            car_agent_trigger_pos = [self._car_agent.get_location().x, self._car_agent.get_location().y, self._car_agent.get_location().z]
+            self.dist_to_target_wp_tr = self.statistics_manager.compute_route_length([car_agent_trigger_pos, self.target_waypoint])
+
+        car_agent_x = self._car_agent.get_location().x
+        car_agent_y = self._car_agent.get_location().y
+        car_agent_z = self._car_agent.get_location().z
+
+        target_x, target_y, target_z = self.target_waypoint
+        dist_x2 = (car_agent_x - target_x)**2
+        dist_y2 = (car_agent_y - target_y)**2
+        dist_z2 = (car_agent_z - target_z)**2
+        dist_to_target_wp = math.sqrt(dist_x2 + dist_y2 + dist_z2)
+        # input(dist_to_next_wp)
+
+        if self.dist_to_target_wp_tr:
+            # print(self.dist_to_target_wp_tr)
+            # print(dist_to_target_wp)
+            dist_toward_target_wp = self.dist_to_target_wp_tr - dist_to_target_wp
+        else:
+            dist_toward_target_wp = 0
+
+        # compute completed distance based on followed target waypoints TODO change to include negative progress
+        # print(self.statistics_manager.compute_route_length(self.followed_target_waypoints))
+        # print(dist_toward_target_wp)
+        self.d_completed = (self.statistics_manager.compute_route_length(self.followed_target_waypoints) + dist_toward_target_wp)
+        # if self.at_waypoint == self.target_waypoint:
+        #     print('completed distance is:', self.d_completed)
+        # print('completed distance is:', self.d_completed)
+        # get distance to destination TODO change formula for this
+        d2target = self.statistics_manager.route_record["route_length"] - \
+                   self.d_completed
+
+        return command_encoded, d2target
+
 
 class PPO_Agent(nn.Module):
     def __init__(self, linear_state_dim, action_dim, action_std):
@@ -865,7 +881,7 @@ def train_PPO(args):
     n_iters = 10000
     n_epochs = 50
     max_steps = 2000
-    gamma = 1
+    gamma = 0.99
     lr = 0.0001
     clip_val = 0.2
     avg_t = 0
@@ -921,10 +937,13 @@ def train_PPO(args):
                 s = copy.deepcopy(s_prime)
                 t += 1
                 episode_return += reward
+                # if reward != 0:
+                #     print(f'reward: {reward}')
+                    # input(f'return: {episode_return}')
         if t == 1:
             continue
         print("Episode return: " + str(episode_return))
-        print("Percent completed: " + str(info[0]))
+        print("Percent completed: " + str(info[1]))
         avg_t += t
         moving_avg = (episode_return - moving_avg) * (2/(iters+2)) + moving_avg
         if len(eps_frames) == 1:
@@ -936,18 +955,18 @@ def train_PPO(args):
         #train PPO
         for i in range(n_epochs):
             current_action_log_probs, state_values, entropies = policy.get_training_params(eps_frames, eps_mes, actions)
-
             policy_ratio = torch.exp(current_action_log_probs - actions_log_probs.detach())
             advantage = returns - state_values.detach()
             advantage = (advantage - advantage.mean()) / advantage.std()
             adv_l_update1 = policy_ratio*advantage.float()
             adv_l_update2 = (torch.clamp(policy_ratio, 1-clip_val, 1+clip_val) * advantage).float()
             adv_l = torch.min(adv_l_update1, adv_l_update2)
-            loss_v = 0.5 * mse(state_values.float(), returns.float())
+            loss_v = mse(state_values.float(), returns.float())
 
-            loss = -adv_l \
-                + loss_v \
-                - 0.001 * entropies
+            loss = \
+                - adv_l \
+                + (0.5 * loss_v) \
+                - (0.01 * entropies)
 
             optimizer.zero_grad()
             loss.mean().backward()
@@ -959,12 +978,13 @@ def train_PPO(args):
         wandb.log({
             "episode_return (suggested reward w/ ri)": episode_return,
             "average_return (suggested reward w/ ri)": moving_avg,
-            # "percent_completed": info[0],
-            # "number_of_collisions": info[1],
-            # "number_of_trafficlight_violations": info[2],
-            # "number_of_stopsign_violations": info[3],
-            # "number_of_route_violations": info[4],
-            # "number_of_times_vehicle_blocked": info[5],
+            # "episode_score_composed": info[0],
+            # "percent_completed": info[1],
+            # "number_of_collisions": info[2],
+            # "number_of_trafficlight_violations": info[3],
+            # "number_of_stopsign_violations": info[4],
+            # "number_of_route_violations": info[5],
+            # "number_of_times_vehicle_blocked": info[6],
             # "timesteps before termination": t,
             # "Step": iters,
             # 'returns_max': returns.max(),
@@ -973,6 +993,9 @@ def train_PPO(args):
             # 'values_max': state_values.max(),
             # 'values_min': state_values.min(),
             # 'values_mean': state_values.mean(),
+            'actions_log_probs_max': (current_action_log_probs - actions_log_probs.detach()).max(),
+            'policy_ratio_max': policy_ratio.max(),
+            'actions_log_probs_mean': (current_action_log_probs - actions_log_probs.detach()).mean(),
             'policy_ratio': policy_ratio.mean(),
             'advantage': advantage.mean(),
             'loss_adv_1': adv_l_update1.mean(),
