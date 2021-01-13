@@ -35,7 +35,7 @@ global device
 class CarlaEnv(object):
     def __init__(self, args, town='Town01'):
         # Tunable parameters
-        self.FRAME_RATE = 5.0  # in Hz
+        self.FRAME_RATE = 30.0  # in Hz
         self.MAX_EP_LENGTH = 60  # in seconds
         self.MAX_EP_LENGTH = self.MAX_EP_LENGTH / (1.0 / self.FRAME_RATE)  # convert to ticks
 
@@ -243,41 +243,44 @@ class CarlaEnv(object):
 
         transform = self._car_agent.get_transform()
         velocity = self._car_agent.get_velocity()
+        rotation = transform.rotation
+
+        dist_completed, wp_index, is_route_completed = self.completion_test.update()
+        command_encoded = self.command2onehot.get(str(self.route_commands[wp_index]))
+        d2target = self.statistics_manager.route_record['route_length'] - dist_completed
 
         velocity_kmh = int(3.6*np.sqrt(np.power(velocity.x, 2) + np.power(velocity.y, 2) + np.power(velocity.z, 2)))
         velocity_mag = np.sqrt(np.power(velocity.x, 2) + np.power(velocity.y, 2) + np.power(velocity.z, 2))
         self.cur_velocity = velocity_mag
 
-        command_encoded, d2target = self.get_route_completion()
-        completed = self.completion_test.update()
-
         state = [self._retrieve_data(q, timeout) for q in self._queues]
         assert all(x.frame == self.frame for x in state)
         state = [self.process_img(img, 80, 80, False) for img in state]
-        # state = self.rgb_img # DEBUG
-        state = [state, velocity_mag, d2target]
+        state = [state, velocity_mag, d2target, rotation.pitch, rotation.yaw, rotation.roll]
         state.extend(command_encoded)
 
-        #check for traffic light infraction/stoplight infraction
+        # check for traffic light infraction/stoplight infraction
         self.check_traffic_light_infraction()
         self.check_stop_sign_infraction()
-        #check if the vehicle is either on a sidewalk or at a wrong lane.
+
+        # check if the vehicle is either on a sidewalk or at a wrong lane.
         self.check_outside_route_lane()
 
-        #get done information
+        # get done information
         if self._tick > self.MAX_EP_LENGTH or self.colllided_w_static:
             done = True
-            self.events.append([TrafficEventType.ROUTE_COMPLETION, completed])
-        elif d2target < 0.1:
+            self.events.append([TrafficEventType.ROUTE_COMPLETION, dist_completed])
+        elif is_route_completed:
             done = True
             self.events.append([TrafficEventType.ROUTE_COMPLETED])
         else:
             done = False
-            self.events.append([TrafficEventType.ROUTE_COMPLETION, completed])
+            self.events.append([TrafficEventType.ROUTE_COMPLETION, dist_completed])
 
         # print(self.events)
-        #get reward information
+        # get reward information
         self.statistics_manager.compute_route_statistics(time.time(), self.events)
+
         #------------------------------------------------------------------------------------------------------------------
         reward = self.statistics_manager.route_record["score_composed"] - self.statistics_manager.prev_score
         # DEBUG
@@ -723,58 +726,6 @@ class CarlaEnv(object):
 
         return am_ab > 0 and am_ab < ab_ab and am_ad > 0 and am_ad < ad_ad
 
-    def get_route_completion(self):
-        # set current waypoint to closest waypoint to agent position
-        closest_index = self.route_kdtree.query([[self._car_agent.get_location().x, self._car_agent.get_location().y,
-                                                  self._car_agent.get_location().z]], k=1)[1][0][0]
-        self.at_waypoint = self.route_waypoints[closest_index]
-        self.followed_waypoints.append(self.at_waypoint)
-
-        # get command of current waypoint
-        command_encoded = self.command2onehot.get(str(self.route_commands[closest_index]))
-
-
-        # get next target waypoint assuming they are ordered by the route planner
-        self.target_waypoint = self.route_waypoints[self.target_waypoint_idx]
-
-        if self.at_waypoint == self.target_waypoint:
-            self.followed_target_waypoints.append(self.target_waypoint)
-            self.target_waypoint_idx += 1
-            self.target_waypoint = self.route_waypoints[self.target_waypoint_idx]
-            car_agent_trigger_pos = [self._car_agent.get_location().x, self._car_agent.get_location().y, self._car_agent.get_location().z]
-            self.dist_to_target_wp_tr = self.statistics_manager.compute_route_length([car_agent_trigger_pos, self.target_waypoint])
-
-        car_agent_x = self._car_agent.get_location().x
-        car_agent_y = self._car_agent.get_location().y
-        car_agent_z = self._car_agent.get_location().z
-
-        target_x, target_y, target_z = self.target_waypoint
-        dist_x2 = (car_agent_x - target_x)**2
-        dist_y2 = (car_agent_y - target_y)**2
-        dist_z2 = (car_agent_z - target_z)**2
-        dist_to_target_wp = math.sqrt(dist_x2 + dist_y2 + dist_z2)
-        # input(dist_to_next_wp)
-
-        if self.dist_to_target_wp_tr:
-            # print(self.dist_to_target_wp_tr)
-            # print(dist_to_target_wp)
-            dist_toward_target_wp = self.dist_to_target_wp_tr - dist_to_target_wp
-        else:
-            dist_toward_target_wp = 0
-
-        # compute completed distance based on followed target waypoints TODO change to include negative progress
-        # print(self.statistics_manager.compute_route_length(self.followed_target_waypoints))
-        # print(dist_toward_target_wp)
-        self.d_completed = (self.statistics_manager.compute_route_length(self.followed_target_waypoints) + dist_toward_target_wp)
-        # if self.at_waypoint == self.target_waypoint:
-        #     print('completed distance is:', self.d_completed)
-        # print('completed distance is:', self.d_completed)
-        # get distance to destination TODO change formula for this
-        d2target = self.statistics_manager.route_record["route_length"] - \
-                   self.d_completed
-
-        return command_encoded, d2target
-
 
 class PPO_Agent(nn.Module):
     def __init__(self, linear_state_dim, action_dim, action_std):
@@ -909,20 +860,24 @@ def train_PPO(args):
 
     wandb.watch(prev_policy)
 
+    rewards = []
+    eps_frames = []
+    eps_frames_raw = []
+    eps_mes = []
+    eps_mes_raw = []
+    actions = []
+    actions_log_probs = []
+    states_p = []
+    terminals = []
+    batch_ep_returns = []
+
     for iters in range(n_iters):
         with CarlaEnv(args) as env:
             s, _, _, _ = env.reset(False, False, iters)
             t = 0
             episode_return = 0
             done = False
-            rewards = []
-            eps_frames = []
-            eps_frames_raw = []
-            eps_mes = []
-            eps_mes_raw = []
-            actions = []
-            actions_log_probs = []
-            states_p = []
+
             while not done:
                 a, a_log_prob = prev_policy.choose_action(format_frame(s[0]), format_mes(s[1:]))
                 s_prime, reward, done, info = env.step(action=a.detach().tolist(), timeout=2)
@@ -934,23 +889,22 @@ def train_PPO(args):
                 actions_log_probs.append(a_log_prob.detach().clone())
                 rewards.append(copy.deepcopy(reward))
                 states_p.append(copy.deepcopy(s_prime))
+                terminals.append(copy.deepcopy(done))
                 s = copy.deepcopy(s_prime)
                 t += 1
                 episode_return += reward
                 # if reward != 0:
                 #     print(f'reward: {reward}')
                     # input(f'return: {episode_return}')
-        if t == 1:
-            continue
-        print("Episode return: " + str(episode_return))
-        print("Percent completed: " + str(info[1]))
-        avg_t += t
-        moving_avg = (episode_return - moving_avg) * (2/(iters+2)) + moving_avg
-        if len(eps_frames) == 1:
-            continue
-        returns = discount_rewards(rewards, gamma)
-        returns = torch.tensor(returns).to(device)
-        actions_log_probs = torch.FloatTensor(actions_log_probs).to(device)
+            # TODO change this hack to calculate when PPO training is triggered, look at PPO batch
+            batch_ep_returns.append(episode_return)
+            prev_timestep_mod = timestep_mod
+            timestep_mod = total_timesteps // update_timestep
+
+            if timestep_mod > prev_timestep_mod:
+                returns = discount_rewards(rewards, gamma, terminals)
+                returns = torch.tensor(returns).to(device)
+                actions_log_probs = torch.FloatTensor(actions_log_probs).to(device)
 
         #train PPO
         for i in range(n_epochs):
@@ -968,58 +922,67 @@ def train_PPO(args):
                 + (0.5 * loss_v) \
                 - (0.01 * entropies)
 
-            optimizer.zero_grad()
-            loss.mean().backward()
-            optimizer.step()
-            if i % 10 == 0:
-                print("    on epoch " + str(i))
-            #wandb.log({"loss": loss.mean()})
+                    optimizer.zero_grad()
+                    loss.mean().backward()
+                    optimizer.step()
+                    if i % 10 == 0:
+                        print("    on epoch " + str(i))
 
-        wandb.log({
-            "episode_return (suggested reward w/ ri)": episode_return,
-            "average_return (suggested reward w/ ri)": moving_avg,
-            # "episode_score_composed": info[0],
-            # "percent_completed": info[1],
-            # "number_of_collisions": info[2],
-            # "number_of_trafficlight_violations": info[3],
-            # "number_of_stopsign_violations": info[4],
-            # "number_of_route_violations": info[5],
-            # "number_of_times_vehicle_blocked": info[6],
-            # "timesteps before termination": t,
-            # "Step": iters,
-            # 'returns_max': returns.max(),
-            # 'returns_min': returns.min(),
-            # 'returns_mean': returns.mean(),
-            # 'values_max': state_values.max(),
-            # 'values_min': state_values.min(),
-            # 'values_mean': state_values.mean(),
-            'actions_log_probs_max': (current_action_log_probs - actions_log_probs.detach()).max(),
-            'policy_ratio_max': policy_ratio.max(),
-            'actions_log_probs_mean': (current_action_log_probs - actions_log_probs.detach()).mean(),
-            'policy_ratio': policy_ratio.mean(),
-            'advantage': advantage.mean(),
-            'loss_adv_1': adv_l_update1.mean(),
-            'loss_adv_2_clipped': adv_l_update2.mean(),
-            'loss_adv_chosen': adv_l.mean(),
-            # 'loss_v': (0.5 * mse(state_values.float(), returns.float())),
-            'loss_v': loss_v,
-            'loss_ent': (- 0.001*entropies).mean(),
-            'loss_mean': loss.mean(),
-            'Sample image': [wandb.Image(eps_frames_raw[img][0], caption=f'Img#: {len(eps_frames_raw)*(-img)}') for img in [0, -1]],
-        })
+                if iters % 50 == 0:
+                    torch.save(policy.state_dict(), "vanilla_policy_state_dictionary.pt")
+                prev_policy.load_state_dict(policy.state_dict())
+
+                avg_batch_ep_returns = sum(batch_ep_returns)/len(batch_ep_returns)
+
+                moving_avg = (avg_batch_ep_returns - moving_avg) * (2 / (train_iters + 2)) + avg_batch_ep_returns
+
+                train_iters += 1
+
+                wandb.log({
+                    "episode_return (suggested reward w/ ri)": avg_batch_ep_returns,
+                    "average_return (suggested reward w/ ri)": moving_avg,
+                    "percent_completed": info[0],
+                    "number_of_collisions": info[1],
+                    "number_of_trafficlight_violations": info[2],
+                    "number_of_stopsign_violations": info[3],
+                    "number_of_route_violations": info[4],
+                    "number_of_times_vehicle_blocked": info[5],
+                    "timesteps before termination": t,
+                    'Sample image': [
+                        wandb.Image(eps_frames_raw[img][0], caption=f'Img#: {len(eps_frames_raw) * (-img)}') for img in
+                        [0, -1]],
+                })
+
+                rewards = []
+                eps_frames = []
+                eps_frames_raw = []
+                eps_mes = []
+                eps_mes_raw = []
+                actions = []
+                actions_log_probs = []
+                states_p = []
+                terminals = []
+                batch_ep_returns = []
+
+        if t == 1:
+            continue
+
 
         if iters % 50 == 0:
             torch.save(policy.state_dict(), "policy_state_dictionary.pt")
         prev_policy.load_state_dict(policy.state_dict())
 
 
-def discount_rewards(r, gamma):
+def discount_rewards(r, gamma, terminals):
     """ take 1D float array of rewards and compute discounted reward """
     # from https://github.com/GoogleCloudPlatform/tensorflow-without-a-phd/blob/master/tensorflow-rl-pong/trainer/helpers.py
     r = np.array(r)
+    rev_terminals = terminals[::-1]
     discounted_r = np.zeros_like(r)
     running_add = 0
     for t in reversed(range(0, r.size)):
+        if rev_terminals[t]:
+            running_add = 0
         running_add = running_add * gamma + r[t]
         discounted_r[t] = running_add
     return discounted_r.tolist()

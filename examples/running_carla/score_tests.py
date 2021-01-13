@@ -97,6 +97,7 @@ class RouteCompletionTest(Criterion):
         self._traffic_event = TrafficEvent(event_type=TrafficEventType.ROUTE_COMPLETION)
         self.list_traffic_events.append(self._traffic_event)
         self._percentage_route_completed = 0.0
+        self.is_route_completed = False
 
     def update(self):
         """
@@ -130,6 +131,7 @@ class RouteCompletionTest(Criterion):
                         self._percentage_route_completed))
 
         if self._percentage_route_completed > 99.0 and location.distance(self.target) < self.DISTANCE_THRESHOLD:
+            self.is_route_completed = True
             route_completion_event = TrafficEvent(event_type=TrafficEventType.ROUTE_COMPLETED)
             route_completion_event.set_message("Destination was successfully reached")
             self.list_traffic_events.append(route_completion_event)
@@ -137,5 +139,5 @@ class RouteCompletionTest(Criterion):
 
         self.actual_value = round(self._percentage_route_completed, 2)
 
-        return self.actual_value
+        return self.actual_value, self._current_index, self.is_route_completed
 
